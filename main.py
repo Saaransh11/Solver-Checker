@@ -325,10 +325,7 @@ def main():
         # Display results in terminal
         ocr.display_results(results)
 
-        # Ask if user wants to save results
-        save_choice = input("\n💾 Save results to text file? (y/n): ").lower().strip()
-        if save_choice in ['y', 'yes']:
-            ocr.save_results(results)
+        ocr.save_results(results)
 
         print("\n🎉 OCR processing completed!")
 
