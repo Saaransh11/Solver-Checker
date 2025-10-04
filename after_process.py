@@ -196,7 +196,7 @@ class JSONAnswerSplitter:
         print("\n" + "=" * 50)
 
 
-def main():
+def main_process(text_path):
     """
     Main interactive function - JSON focused
     """
@@ -212,9 +212,6 @@ def main():
     splitter = JSONAnswerSplitter()
 
     text = ""
-
-    # Load from text file
-    text_path = input("\n📁 Enter text file path: ").strip('\"\' ')
 
 
     try:
@@ -255,10 +252,7 @@ def main():
 
 
     # Get output filename
-    default_name = "split_answers"
-    output_name = input(f"📁 Output filename (default: {default_name}): ").strip()
-    if not output_name:
-        output_name = default_name
+    output_name = "split_answers"
 
 
     try:
@@ -281,10 +275,8 @@ def main():
         print('  },')
         print('  "metadata": {...}')
         print("}")
+        return output_file
 
 
     except Exception as e:
         print(f"❌ Error saving JSON: {e}")
-
-if __name__ == "__main__":
-    main()

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import List, Dict
 from typing import List, Dict, Optional
+import after_process
 
 # Suppress Google Cloud logging warnings
 os.environ["GRPC_VERBOSITY"] = "ERROR"
@@ -283,6 +284,7 @@ class PDFHandwritingOCR:
                 f.write(results['full_text'])
 
             print(f"💾 Results saved to: {output_file}")
+            return output_file
 
         except Exception as e:
             print(f"⚠️  Could not save results to file: {e}")
@@ -325,9 +327,11 @@ def main():
         # Display results in terminal
         ocr.display_results(results)
 
-        ocr.save_results(results)
+        file = ocr.save_results(results)
 
         print("\n🎉 OCR processing completed!")
+        processed_file = after_process.main_process(text_path=file)
+        print(f"\n✅ Post-processing completed! Output file: {processed_file}")
 
     except KeyboardInterrupt:
         print("\n\n⏹️  Processing interrupted by user")
