@@ -1,342 +1,245 @@
-
 #!/usr/bin/env python3
 """
-PDF Handwritten Text OCR using Google Cloud Vision API
-Converts PDF pages to images and extracts handwritten text using Vision API
+Enhanced PDF Handwritten OCR v5.8
+- Aggressive multi-pass cleaning with unicode and repetition filtering
+- Robust answer extraction with fuzzy OCR corrections
+- Clear metadata separation
 """
 
 import os
 import sys
 import time
+import re
+import json
+import unicodedata
 from pathlib import Path
-from typing import List, Dict
-from typing import List, Dict, Optional
-import after_process
+from typing import List, Dict, Optional, Union, Tuple
+from datetime import datetime
+import logging
 
-# Suppress Google Cloud logging warnings
+from pdf2image import convert_from_path
+from PIL import Image
+import io
+from google.oauth2 import service_account
+from google.cloud import vision
+
+# Suppress Google Cloud warnings
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
 
-# Import required libraries
-try:
-    from google.cloud import vision
-    from google.oauth2 import service_account
-    from pdf2image import convert_from_path
-    from PIL import Image
-    import io
-except ImportError as e:
-    print(f"❌ Missing required library: {e}")
-    print("\nInstall required packages:")
-    print("pip install google-cloud-vision pdf2image pillow google-auth")
-    print("\nFor PDF processing, you also need poppler:")
-    print("- Ubuntu/Debian: sudo apt-get install poppler-utils")
-    print("- macOS: brew install poppler") 
-    print("- Windows: Download poppler binaries and add to PATH")
-    sys.exit(1)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
+class AdvancedTextCleaner:
+    def __init__(self, max_passes: int = 3):
+        self.max_passes = max_passes
+        self.cleaning_stats = {}
+        self.metadata_noise_patterns = [
+            r"={3,}", r"-{3,}", r"OCR\s+PROCESSING\s+RESULTS?", r"TOTAL\s+PAGES?:\s*\d+",
+            r"AVERAGE\s+CONFIDENCE:\s*\d+", r"SOURCE\s+FILE:.*?\.pdf", r"---\s*PAGE\s+\d+\s*---"
+        ]
+        self.institutional_patterns = [
+            r"ALLEN", r"CAREER\s+INSTITUTS?", r"KOTA\s*\(PAJASTHAN", r"KOTA\s*\(RAJASTHAN", 
+            r"MARKS", r"Q\.?\s*NO\.?", r"CANDIDATE\s+ANSWER"
+        ]
+        self.short_line_patterns = [
+            r"^[A-Za-z0-9]{1,2}$", r"^[\W_]{1,2}$", r"^[A-Za-z]\s+[A-Za-z]$", r"^\s*[☐]\s*$"
+        ]
+        self.garbage_patterns = [
+            r"^[Il1|]{1,3}$", r"^[O0]{1,3}$", r"^[+\-*_:]{1,3}$", r"^\s*I anA\s*$",
+            r"^\s*☐\s*I.?anA\s*$", r"^\s*I\s*anA\s*$"
+        ]
+        
+    def clean(self, text: str) -> str:
+        text = unicodedata.normalize("NFKC", text)
+        kept_lines = text.splitlines()
+        total_removed = 0
 
-class PDFHandwritingOCR:
-    """PDF Handwriting OCR processor using Google Cloud Vision API"""
+        for pass_num in range(1, self.max_passes + 1):
+            new_kept = []
+            removed = 0
+            for line in kept_lines:
+                l = line.strip()
+                if self._is_noise_line(l):
+                    removed += 1
+                    continue
+                new_kept.append(line)
+            kept_lines = new_kept
+            total_removed += removed
+            logger.info(f"Cleaning pass {pass_num} finished - lines removed: {removed}")
 
-    def __init__(self, credentials_path: str):
-        """
-        Initialize the OCR processor with credentials
+            if removed == 0:
+                break
 
-        Args:
-            credentials_path: Path to Google Cloud service account JSON file
-        """
-        self.credentials_path = credentials_path
-        self.client = self._setup_vision_client()
+        cleaned_text = "\n".join(kept_lines)
+        total_lines = len(text.splitlines())
+        kept_lines_count = len(kept_lines)
 
-    def _setup_vision_client(self):
-        """Setup Google Cloud Vision API client"""
-        try:
-            if not os.path.exists(self.credentials_path):
-                raise FileNotFoundError(f"Credentials file not found: {self.credentials_path}")
-
-            # Load credentials from JSON file
-            credentials = service_account.Credentials.from_service_account_file(
-                self.credentials_path
-            )
-
-            # Create Vision API client
-            client = vision.ImageAnnotatorClient(credentials=credentials)
-
-            print("✅ Google Cloud Vision API client initialized successfully")
-            return client
-
-        except Exception as e:
-            print(f"❌ Failed to setup Vision API client: {e}")
-            sys.exit(1)
-
-    def pdf_to_images(self, pdf_path: str, dpi: int = 200) -> List[Image.Image]:
-        """
-        Convert PDF pages to PIL Images
-
-        Args:
-            pdf_path: Path to PDF file
-            dpi: Resolution for conversion (higher = better quality but slower)
-
-        Returns:
-            List of PIL Image objects
-        """
-        try:
-            print(f"📄 Converting PDF to images: {pdf_path}")
-            pages = convert_from_path(pdf_path, dpi=dpi)
-            print(f"✅ Successfully converted {len(pages)} pages")
-            return pages
-
-        except Exception as e:
-            print(f"❌ Error converting PDF to images: {e}")
-            return []
-
-    def extract_text_from_image(self, image: Image.Image, page_num: int) -> Dict:
-        """
-        Extract handwritten text from a single image using Vision API
-
-        Args:
-            image: PIL Image object
-            page_num: Page number for reference
-
-        Returns:
-            Dictionary with extracted text and metadata
-        """
-        try:
-            print(f"🔍 Processing page {page_num}...")
-
-            # Convert PIL Image to bytes
-            img_byte_arr = io.BytesIO()
-            image.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
-
-            # Create Vision API image object
-            vision_image = vision.Image(content=img_byte_arr)
-
-            # Configure for handwriting detection
-            image_context = vision.ImageContext(
-                language_hints=["en-t-i0-handwrit"]  # English handwriting model
-            )
-
-            # Use DOCUMENT_TEXT_DETECTION for better layout understanding
-            feature = vision.Feature(
-                type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION
-            )
-
-            # Create request
-            request = vision.AnnotateImageRequest(
-                image=vision_image,
-                features=[feature],
-                image_context=image_context
-            )
-
-            # Make API call
-            response = self.client.annotate_image(request=request)
-
-            # Check for errors
-            if response.error.message:
-                print(f"⚠️  API error on page {page_num}: {response.error.message}")
-                return {"page": page_num, "text": "", "error": response.error.message}
-
-            # Extract text
-            full_text = ""
-            confidence_scores = []
-
-            if hasattr(response, 'full_text_annotation') and response.full_text_annotation:
-                full_text = response.full_text_annotation.text
-
-                # Extract confidence scores
-                for page in response.full_text_annotation.pages:
-                    for block in page.blocks:
-                        confidence_scores.append(block.confidence)
-
-            # Calculate average confidence
-            avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
-
-            result = {
-                "page": page_num,
-                "text": full_text.strip(),
-                "confidence": avg_confidence,
-                "word_count": len(full_text.split()) if full_text else 0
-            }
-
-            print(f"✅ Page {page_num}: {result['word_count']} words, confidence: {avg_confidence:.2f}")
-            return result
-
-        except Exception as e:
-            print(f"❌ Error processing page {page_num}: {e}")
-            return {"page": page_num, "text": "", "error": str(e)}
-
-    def process_pdf(self, pdf_path: str, dpi: int = 200) -> Dict:
-        """
-        Process entire PDF and extract handwritten text
-
-        Args:
-            pdf_path: Path to PDF file
-            dpi: Resolution for PDF conversion
-
-        Returns:
-            Dictionary with all extracted text and metadata
-        """
-        start_time = time.time()
-
-        print("🚀 Starting PDF handwriting OCR process...")
-        print(f"📁 Input file: {pdf_path}")
-
-        # Check if PDF exists
-        if not os.path.exists(pdf_path):
-            print(f"❌ PDF file not found: {pdf_path}")
-            return {"error": "File not found"}
-
-        # Convert PDF to images
-        images = self.pdf_to_images(pdf_path, dpi)
-        if not images:
-            return {"error": "Failed to convert PDF to images"}
-
-        # Process each page
-        all_results = {
-            "source_file": pdf_path,
-            "total_pages": len(images),
-            "pages": [],
-            "full_text": "",
-            "total_words": 0,
-            "avg_confidence": 0.0,
-            "processing_time": 0.0
+        self.cleaning_stats = {
+            "total_lines_start": total_lines,
+            "total_lines_kept": kept_lines_count,
+            "total_lines_removed": total_lines - kept_lines_count,
+            "total_lines_removed_percentage": round((total_lines - kept_lines_count) / total_lines * 100, 2) if total_lines else 0,
+            "passes_completed": pass_num,
         }
+        return cleaned_text
 
-        confidences = []
+    def _is_noise_line(self, line: str) -> bool:
+        if not line:
+            return True
+        for p in self.metadata_noise_patterns:
+            if re.search(p, line, re.IGNORECASE):
+                return True
+        for p in self.institutional_patterns:
+            if re.search(p, line, re.IGNORECASE):
+                return True
+        for p in self.short_line_patterns:
+            if re.match(p, line):
+                return True
+        for p in self.garbage_patterns:
+            if re.match(p, line):
+                return True
 
-        for i, image in enumerate(images, 1):
-            # Add small delay to avoid rate limiting
-            if i > 1:
-                time.sleep(0.5)
+        # Remove lines with >50% non-ASCII chars (likely foreign/unreadable text)
+        if (sum(1 for c in line if ord(c) > 127) / max(len(line), 1)) > 0.5:
+            return True
 
-            page_result = self.extract_text_from_image(image, i)
-            all_results["pages"].append(page_result)
+        # Remove lines with 6 or more repetition of same char
+        if re.search(r'(.)\1{5,}', line):
+            return True
 
-            if page_result.get("text"):
-                all_results["full_text"] += f"\n--- Page {i} ---\n"
-                all_results["full_text"] += page_result["text"] + "\n"
-                all_results["total_words"] += page_result.get("word_count", 0)
+        # Remove lines with less than 20% alphanumeric characters
+        if (sum(c.isalnum() for c in line) / max(len(line), 1)) < 0.2:
+            return True
 
-                if page_result.get("confidence", 0) > 0:
-                    confidences.append(page_result["confidence"])
+        return False
 
-        # Calculate final metrics
-        all_results["avg_confidence"] = sum(confidences) / len(confidences) if confidences else 0.0
-        all_results["processing_time"] = time.time() - start_time
 
-        return all_results
+class RobustAnswerExtractor:
+    def __init__(self):
+        # Capture numbering as digit or single letter (fuzzy to handle OCR errors)
+        self.pats = [
+            r"(?:^|\n)\s*Ans\s*([0-9A-Za-z])\.?\s*(.*?)(?=(?:\n\s*Ans\s*[0-9A-Za-z])|\Z)",
+            r"(?:^|\n)\s*([0-9A-Za-z])\.\s*(.*?)(?=(?:\n\s*[0-9A-Za-z]\.)|\Z)"
+        ]
+        # Sub-question patterns - lowercase letters and roman numerals
+        self.subp = [
+            r"\(([a-z])\)\s*(.*?)(?=(?:\([a-z]\))|\Z)",
+            r"\(([ivxlc]+)\)\s*(.*?)(?=(?:\([ivxlc]+\))|\Z)"
+        ]
+        # Map common OCR misreads of digits to actual digits
+        self.ocr_corrections = str.maketrans({
+            'O': '0', 'o': '0',
+            'I': '1', 'l': '1', 'Z': '2', 'S': '5', 'B': '8', 'Y': '4'
+        })
 
-    def display_results(self, results: Dict):
-        """Display OCR results in terminal"""
+    def extract(self, text: str) -> Dict[str, Union[str, Dict[str, str]]]:
+        out: Dict[str, Union[str, Dict[str, str]]] = {}
+        for pat in self.pats:
+            for num, body in re.findall(pat, text, flags=re.IGNORECASE | re.DOTALL):
+                # Correct OCR misreads in the captured numbering
+                num_clean = num.translate(self.ocr_corrections)
+                if not num_clean.isdigit():
+                    continue
+                content = re.sub(r"\s+", " ", body).strip()
+                if not content:
+                    continue
+                subs = self._subs(content)
+                if subs:
+                    out[num_clean] = subs
+                else:
+                    out[num_clean] = content
+        return out
+
+    def _subs(self, content: str) -> Dict[str, str]:
+        d: Dict[str, str] = {}
+        for sp in self.subp:
+            for key, val in re.findall(sp, content, flags=re.IGNORECASE | re.DOTALL):
+                d[f"({key})"] = re.sub(r"\s+", " ", val).strip()
+        return d
+
+
+class EnhancedPDFOCR:
+    def __init__(self, credentials_path: str):
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError("credentials.json missing")
+        creds = service_account.Credentials.from_service_account_file(credentials_path)
+        self.client = vision.ImageAnnotatorClient(credentials=creds)
+        self.cleaner = AdvancedTextCleaner()
+        self.extractor = RobustAnswerExtractor()
+        self.processing_meta = {}
+
+    def pdf_to_images(self, path: str, dpi: int = 300) -> List[Image.Image]:
+        pages = convert_from_path(path, dpi=dpi)
+        fsize = os.stat(path).st_size
+        self.processing_meta = {
+            "source_file": path,
+            "file_size_bytes": fsize,
+            "file_size_mb": round(fsize / (1024 * 1024), 2),
+            "total_pages": len(pages),
+            "start_time": datetime.now().isoformat(),
+        }
+        return pages
+
+    def image_to_text(self, img: Image.Image) -> str:
+        buf = io.BytesIO()
+        img.convert("L").save(buf, format="PNG")
+        buf.seek(0)
+        vimg = vision.Image(content=buf.getvalue())
+        feat = vision.Feature(type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION)
+        req = vision.AnnotateImageRequest(image=vimg, features=[feat])
+        resp = self.client.annotate_image(request=req)
+        return resp.full_text_annotation.text if resp.full_text_annotation else ""
+
+    def process(self, pdf_path: str) -> Dict:
+        start = time.time()
+        pages = self.pdf_to_images(pdf_path)
+        full_text = ""
+        word_count = 0
+        char_count = 0
+        for idx, page in enumerate(pages, 1):
+            txt = self.image_to_text(page)
+            full_text += txt + "\n"
+            word_count += len(txt.split())
+            char_count += len(txt)
+            time.sleep(0.5)
+        cleaned = self.cleaner.clean(full_text)
+        answers = self.extractor.extract(cleaned)
+        self.processing_meta.update({
+            "processing_time_seconds": round(time.time() - start, 2),
+            "total_words_extracted": word_count,
+            "total_characters_extracted": char_count,
+            "total_answers_found": len(answers),
+            "cleaning_stats": self.cleaner.cleaning_stats,
+            "end_time": datetime.now().isoformat(),
+        })
+        return {"answers": answers, "metadata": self.processing_meta, "raw_text": cleaned}
+
+    def save_results(self, results: Dict, output_prefix: Optional[str] = None) -> Tuple[str, str]:
         if "error" in results:
-            print(f"❌ Error: {results['error']}")
-            return
-
-        print("\n" + "="*60)
-        print("📊 OCR PROCESSING RESULTS")
-        print("="*60)
-
-        print(f"📄 Source File: {results['source_file']}")
-        print(f"📑 Total Pages: {results['total_pages']}")
-        print(f"📝 Total Words: {results['total_words']}")
-        print(f"🎯 Average Confidence: {results['avg_confidence']:.2f}")
-        print(f"⏱️  Processing Time: {results['processing_time']:.2f} seconds")
-
-        # Show page-by-page summary
-        print(f"\n📋 Page Summary:")
-        for page in results['pages']:
-            status = "✅" if page.get('text') else "❌"
-            confidence = page.get('confidence', 0)
-            words = page.get('word_count', 0)
-            print(f"  {status} Page {page['page']}: {words} words (confidence: {confidence:.2f})")
-
-        print("\n" + "="*60)
-        print("📄 EXTRACTED TEXT")
-        print("="*60)
-
-        if results['full_text'].strip():
-            print(results['full_text'])
-        else:
-            print("❌ No text was extracted from the PDF")
-
-        print("="*60)
-
-    def save_results(self, results: Dict, output_file: Optional[str] = None):
-        """Save results to text file"""
-        if "error" in results:
-            return
-
-        if not output_file:
-            pdf_name = Path(results['source_file']).stem
-            output_file = f"{pdf_name}_extracted_text.txt"
-
-        try:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(f"Extracted Text from: {results['source_file']}\n")
-                f.write(f"Processing Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Total Pages: {results['total_pages']}\n")
-                f.write(f"Total Words: {results['total_words']}\n")
-                f.write(f"Average Confidence: {results['avg_confidence']:.2f}\n")
-                f.write("\n" + "="*60 + "\n")
-                f.write("EXTRACTED TEXT\n")
-                f.write("="*60 + "\n")
-                f.write(results['full_text'])
-
-            print(f"💾 Results saved to: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"⚠️  Could not save results to file: {e}")
+            return "", ""
+        if not output_prefix:
+            prefix = Path(results["metadata"]["source_file"]).stem
+            output_prefix = f"{prefix}_processed"
+        json_file = f"{output_prefix}.json"
+        txt_file = f"{output_prefix}.txt"
+        with open(json_file, "w", encoding="utf-8") as jf:
+            json.dump({"answers": results["answers"], "metadata": results["metadata"]}, jf, indent=2)
+        with open(txt_file, "w", encoding="utf-8") as tf:
+            tf.write(results["raw_text"])
+        logger.info(f"Saved JSON: {json_file}; Text: {txt_file}")
+        return json_file, txt_file
 
 
 def main():
-    """Main function to run the PDF OCR script"""
-    print("🔤 PDF Handwriting OCR using Google Cloud Vision API")
-    print("="*60)
-
-    # Configuration
-    CREDENTIALS_FILE = "credentials.json"  # Update this path
-
-    # Check if credentials file exists
-    if not os.path.exists(CREDENTIALS_FILE):
-        print(f"❌ Credentials file not found: {CREDENTIALS_FILE}")
-        print("\nSetup instructions:")
-        print("1. Download your service account JSON key from Google Cloud Console")
-        print("2. Save it as 'credentials.json' in the same directory as this script")
-        print("3. Make sure Cloud Vision API is enabled in your project")
-        return
-
-    # Get PDF file path from user input or command line
-    if len(sys.argv) > 1:
-        pdf_path = sys.argv[1]
-    else:
-        pdf_path = input("\n📁 Enter the path to your PDF file: ").strip().strip('"')
-
-    if not pdf_path:
-        print("❌ No PDF file specified")
-        return
-
-    try:
-        # Initialize OCR processor
-        ocr = PDFHandwritingOCR(CREDENTIALS_FILE)
-
-        # Process PDF
-        results = ocr.process_pdf(pdf_path)
-
-        # Display results in terminal
-        ocr.display_results(results)
-
-        file = ocr.save_results(results)
-
-        print("\n🎉 OCR processing completed!")
-        processed_file = after_process.main_process(text_path=file)
-        print(f"\n✅ Post-processing completed! Output file: {processed_file}")
-
-    except KeyboardInterrupt:
-        print("\n\n⏹️  Processing interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <PDF_PATH>")
+        sys.exit(1)
+    pdf_path = sys.argv[1]
+    creds_path = "credentials.json"
+    ocr = EnhancedPDFOCR(creds_path)
+    results = ocr.process(pdf_path)
+    ocr.save_results(results)
 
 
 if __name__ == "__main__":

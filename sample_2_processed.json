@@ -1,0 +1,33 @@
+{
+  "answers": {
+    "1": "Because in the joun journey of life one road leads to another and seldom relieve the moments and undo the circumstances gone by. Can",
+    "2": {
+      "(i)": "",
+      "(ii)": "It can lead to serious physical issues such as hypertension, cardiovascular problems and even pain Psychological effects include nausea, vomitting increased stress and irri- tability which disrupt overall well being"
+    },
+    "3": {
+      "(a)": "An object or action that indicates person's wealth or importance."
+    },
+    "5": "He chose the first second road which had been less travelled by and equally fair, grassy and covered with yellow 'wanted wear'. It was leaves. barber of a family of prooffers professional musicians decided to improve the pungi. He chose hollow stem that was longer and broader pipe with than the pungi. He played the instrument before the royalty,",
+    "4": "was impressed. Since it was first played in the chamber the word 'Sheh' and it was played by a and everyone of Shehanshah from there 'nai' from there came came the name 'Shehnai'."
+  },
+  "metadata": {
+    "source_file": "sample_2.pdf",
+    "file_size_bytes": 930574,
+    "file_size_mb": 0.89,
+    "total_pages": 2,
+    "start_time": "2025-10-07T00:46:38.725518",
+    "processing_time_seconds": 6.17,
+    "total_words_extracted": 197,
+    "total_characters_extracted": 1148,
+    "total_answers_found": 5,
+    "cleaning_stats": {
+      "total_lines_start": 55,
+      "total_lines_kept": 37,
+      "total_lines_removed": 18,
+      "total_lines_removed_percentage": 32.73,
+      "passes_completed": 2
+    },
+    "end_time": "2025-10-07T00:46:44.567068"
+  }
+}
